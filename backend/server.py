@@ -175,6 +175,7 @@ def filter_network_by_bbox(
     return out
 # Helper for busstops
 
+# ====== END ASTON FILTER HELPERS ======
 
 # ====== END ASTON FILTER HELPERS ======
 
@@ -225,55 +226,31 @@ def get_network(
     except FileNotFoundError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    '''net = build_aston_network(
-        stops, routes, trips, stop_times, shapes,
-        buffer_meters=bufferMeters,
-    )'''
-
-    # If bbox provided, filter by bbox. Otherwise, return radius-based build result.
-    '''if all(v is not None for v in [minLat, minLng, maxLat, maxLng]):
-        return filter_network_by_bbox(
-            net,
-            bbox=(float(minLat), float(minLng), float(maxLat), float(maxLng)),
-            min_stops_in_area=int(minStopsInArea),
-            clip_shapes=True,
-        )'''
-    
-        # If bbox params are provided, use them; otherwise use the hardcoded Aston square
+    # Build bbox if provided
+    bbox = None
     if all(v is not None for v in [minLat, minLng, maxLat, maxLng]):
         bbox = (float(minLat), float(minLng), float(maxLat), float(maxLng))
-    else:
-        bbox = ASTON_BBOX
 
-    return filter_network_by_bbox(
-        net,
+    # If your build_aston_network supports bbox=..., pass it.
+    # Otherwise remove bbox=bbox and use filter_network_by_bbox below.
+    net = build_aston_network(
+        stops, routes, trips, stop_times, shapes,
+        buffer_meters=bufferMeters,
         bbox=bbox,
-        min_stops_in_area=int(minStopsInArea),
-        clip_shapes=True,
     )
 
-    # No bbox -> just return net (or re-enable radius filter if you want)
-    #return net
+    # If you DID NOT add bbox support in build_network.py, use this instead:
+    # net = build_aston_network(stops, routes, trips, stop_times, shapes, buffer_meters=bufferMeters)
+    # if bbox is not None:
+    #     net = filter_network_by_bbox(net, bbox=bbox, min_stops_in_area=int(minStopsInArea), clip_shapes=True)
 
+    # If bbox provided and you still want minStopsInArea filtering, you can apply it here too:
+    if bbox is not None:
+        net = filter_network_by_bbox(
+            net,
+            bbox=bbox,
+            min_stops_in_area=int(minStopsInArea),
+            clip_shapes=True,
+        )
 
-@app.get("/api/gtfs/status")
-def gtfs_status():
-    return {
-        "has_keys": bool(TFWM_APP_ID and TFWM_APP_KEY),
-        "cache_zip_exists": os.path.exists("cache/tfwm_gtfs.zip"),
-        "gtfs_dir_exists": os.path.exists("gtfs_data"),
-    }
-
-@app.post("/api/gtfs/refresh")
-def refresh_gtfs():
-    if not TFWM_APP_ID or not TFWM_APP_KEY:
-        return {"ok": False, "error": "Missing TFWM_APP_ID/TFWM_APP_KEY in backend/.env"}
-
-    zip_path = "cache/tfwm_gtfs.zip"
-    data_dir = "gtfs_data"
-
-    download_gtfs_zip(TFWM_APP_ID, TFWM_APP_KEY, zip_path)
-    extract_gtfs_zip(zip_path, data_dir)
-
-    files = sorted([f for f in os.listdir(data_dir) if f.endswith(".txt")])
-    return {"ok": True, "files": files}
+    return net

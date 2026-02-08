@@ -1,4 +1,5 @@
 // src/pages/Index.tsx
+
 import { useCallback } from 'react';
 import SimulationMap from '@/components/SimulationMap';
 import ControlPanel from '@/components/ControlPanel';
@@ -15,7 +16,7 @@ export default function Index() {
     setSpeed,
     toggleCorridors,
     toggleFlow,
-    toggleRoutes,          // ✅ if you want the panel to toggle “routes”
+    togglePOIs,
     selectAgent,
     clearGeneratedRoutes,
     generateFromFlow,
@@ -31,15 +32,16 @@ export default function Index() {
         <SimulationMap
           agents={state.agents}
           vehicles={state.vehicles}
+          showFlow={(state as any).showFlow}
+          showCorridors={(state as any).showCorridors}
+          showPOIs={(state as any).showPOIs}
+          pois={state.pois}
           generatedRoutes={state.generatedRoutes}
           selectedAgentId={state.selectedAgentId}
           onSelectAgent={selectAgent}
-          showFlow={state.showFlow}
-          showCorridors={state.showCorridors}
-          stops={state.networkStops}
-          baseRoutes={state.showRoutes ? BUS_ROUTES : []}
-          showRoutes={state.showRoutes}
-          />
+          baseRoutes={[]}
+          stops={state.networkStops as any}
+        />
       </div>
 
       <ControlPanel
@@ -51,6 +53,7 @@ export default function Index() {
         onSetSpeed={setSpeed}
         onToggleFlow={toggleFlow}
         onToggleCorridors={toggleCorridors}
+        onTogglePOIs={togglePOIs}
         onGenerateRoute={handleGenerateRoute}
         onClearRoutes={clearGeneratedRoutes}
       />

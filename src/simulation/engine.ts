@@ -1,5 +1,6 @@
 // src/simulation/engine.ts
 // Offline-first: life-like schedules + dwell + flow recording
+import { routeLengthKm } from '@/hooks/useSimulation';
 
 
 import {
@@ -442,6 +443,300 @@ function makeSchedule(agent: Agent, pois: POI[] = [],): Trip[] {
   return schedule;
 }
 
+
+// ----------------------------------
+// ASSIGNMENT LITE (Phase 1)
+// Routes act as "lines". We compute best option:
+// - walk-only
+// - 1-line bus
+// - 2-line bus (1 transfer)
+// ----------------------------------
+
+type TripPlan = {
+  mode: 'walk' | 'bus';
+  // boarding/alighting
+  boardStopId?: string;
+  alightStopId?: string;
+  transferStopId?: string;
+
+  // lines used
+  routeIds: string[]; // length 0 (walk), 1 (direct), 2 (transfer)
+
+  // components (minutes)
+  walkAccessMin: number;
+  walkEgressMin: number;
+  waitMin: number;
+  rideMin: number;
+  transfers: number;
+
+  // distance (km) for debugging/CO2 later
+  walkKm: number;
+  rideKm: number;
+
+  // generalized cost (lower is better)
+  cost: number;
+
+  // debug label
+  label: string;
+};
+
+type AssignmentWeights = {
+  w_walk: number;
+  w_wait: number;
+  w_ride: number;
+  w_xfer: number;
+  xferPenaltyMin: number; // extra minutes per transfer to discourage messy paths
+};
+
+// sensible defaults for hackathon
+const ASSIGN_W: AssignmentWeights = {
+  w_walk: 1.0,
+  w_wait: 0.7,     // waiting feels worse than riding
+  w_ride: 1.0,
+  w_xfer: 6.0,
+  xferPenaltyMin: 6,
+};
+
+function minutesForWalk(km: number) {
+  return km / WALK_KM_PER_MIN;
+}
+function minutesForRide(km: number) {
+  return km / TRANSIT_KM_PER_MIN;
+}
+
+function routeHeadwayMin(route: BusRoute): number {
+  // your BusRoute.frequency is already "minutes between vehicles"
+  const f = Number(route.frequency);
+  return Number.isFinite(f) && f > 0 ? f : 12;
+}
+
+function buildStopById(stops: BusStop[]) {
+  return new Map(stops.map(s => [s.id, s]));
+}
+
+function routeStopIndex(route: BusRoute) {
+  const idx = new Map<string, number>();
+  (route.stopIds || []).forEach((id, i) => idx.set(id, i));
+  return idx;
+}
+
+
+function routeStopSegment(route: BusRoute, fromStopId: string, toStopId: string): string[] | null {
+  if (!route.stopIds || route.stopIds.length < 2) return null;
+  const idx = routeStopIndex(route);
+  const i = idx.get(fromStopId);
+  const j = idx.get(toStopId);
+  if (i == null || j == null) return null;
+  if (i === j) return [fromStopId];
+
+  // ✅ bidirectional segment
+  if (i < j) return route.stopIds.slice(i, j + 1);
+  return route.stopIds.slice(j, i + 1).reverse();
+}
+
+
+
+function routeRideDistanceKm(
+  route: BusRoute,
+  stopById: Map<string, BusStop>,
+  fromStopId: string,
+  toStopId: string
+): number | null {
+  const idx = routeStopIndex(route);
+  const i = idx.get(fromStopId);
+  const j = idx.get(toStopId);
+
+  if (i == null || j == null) return null;
+  if (i === j) return 0;
+
+  // ✅ allow travel in either direction along the same line
+  const a = Math.min(i, j);
+  const b = Math.max(i, j);
+
+  let km = 0;
+  for (let k = a; k < b; k++) {
+    const s1Id = route.stopIds[k];
+    const s2Id = route.stopIds[k + 1];
+    const s1 = stopById.get(s1Id);
+    const s2 = stopById.get(s2Id);
+    if (!s1 || !s2) return null;
+
+    const d = haversineDistance(s1.location, s2.location);
+    km += Number.isFinite(d) ? d : 0;
+  }
+
+  return km;
+}
+
+
+function generalizedCost(plan: Omit<TripPlan, 'cost'>, w: AssignmentWeights): number {
+  return (
+    w.w_walk * (plan.walkAccessMin + plan.walkEgressMin) +
+    w.w_wait * plan.waitMin +
+    w.w_ride * plan.rideMin +
+    w.w_xfer * (plan.transfers * w.xferPenaltyMin)
+  );
+}
+
+function computeTripPlanLite(
+  origin: [number, number],
+  destination: [number, number],
+  stops: BusStop[],
+  routes: BusRoute[],
+  w: AssignmentWeights = ASSIGN_W
+): TripPlan {
+  const stopById = buildStopById(stops);
+
+  // Always include walk-only fallback
+  const walkKm = haversineDistance(origin, destination);
+  const walkOnlyBase: Omit<TripPlan, 'cost'> = {
+    mode: 'walk',
+    routeIds: [],
+    walkAccessMin: minutesForWalk(Number.isFinite(walkKm) ? walkKm : 0),
+    walkEgressMin: 0,
+    waitMin: 0,
+    rideMin: 0,
+    transfers: 0,
+    walkKm: Number.isFinite(walkKm) ? walkKm : 0,
+    rideKm: 0,
+    label: 'walk_only',
+  };
+  let best: TripPlan = { ...walkOnlyBase, cost: generalizedCost(walkOnlyBase, w) };
+
+  // If no routes, return walk-only
+  if (!routes || routes.length === 0) return best;
+
+  // Nearest stops to origin/destination (small K improves realism and avoids weird "nearest" corner cases)
+  const K = 6;
+  const originCandidates = stops
+    .map(s => ({ id: s.id, km: haversineDistance(origin, s.location) }))
+    .filter(x => Number.isFinite(x.km))
+    .sort((a, b) => a.km - b.km)
+    .slice(0, K);
+
+  const destCandidates = stops
+    .map(s => ({ id: s.id, km: haversineDistance(destination, s.location) }))
+    .filter(x => Number.isFinite(x.km))
+    .sort((a, b) => a.km - b.km)
+    .slice(0, K);
+
+  // ✅ Phase 2B: don't consider bus if access/egress walk is too long (keeps choices realistic)
+const MAX_WALK_ACCESS_MIN = 15; // tweak: 10–15 feels realistic
+
+
+  // DIRECT (1-line) candidates
+  for (const r of routes) {
+    if (!r.stopIds || r.stopIds.length < 2) continue;
+
+    const headway = routeHeadwayMin(r);
+const expectedWait = (headway / 2) * 0.6; // ✅ make bus more attractive
+
+    for (const o of originCandidates) {
+      for (const d of destCandidates) {
+        const rideKm = routeRideDistanceKm(r, stopById, o.id, d.id);
+        if (rideKm == null) continue;
+
+        const accessMin = minutesForWalk(o.km);
+        const egressKm = haversineDistance((stopById.get(d.id)!).location, destination);
+        const egressMin = minutesForWalk(Number.isFinite(egressKm) ? egressKm : 0);
+        // ✅ skip unrealistic bus options
+if (accessMin > MAX_WALK_ACCESS_MIN || egressMin > MAX_WALK_ACCESS_MIN) continue;
+
+
+        const base: Omit<TripPlan, 'cost'> = {
+          mode: 'bus',
+          routeIds: [r.id],
+          boardStopId: o.id,
+          alightStopId: d.id,
+          walkAccessMin: accessMin,
+          walkEgressMin: egressMin,
+          waitMin: expectedWait,
+          rideMin: minutesForRide(rideKm),
+          transfers: 0,
+          walkKm: (Number.isFinite(o.km) ? o.km : 0) + (Number.isFinite(egressKm) ? egressKm : 0),
+          rideKm,
+          label: `direct:${r.id}`,
+        };
+
+        const plan: TripPlan = { ...base, cost: generalizedCost(base, w) };
+        if (plan.cost < best.cost) best = plan;
+      }
+    }
+  }
+
+  // ONE TRANSFER (2-line) candidates
+  // Find an interchange stop that exists on both routes, travel A: board->xfer, then B: xfer->alight
+  for (let i = 0; i < routes.length; i++) {
+    const r1 = routes[i];
+    if (!r1.stopIds || r1.stopIds.length < 2) continue;
+    const idx1 = routeStopIndex(r1);
+    const headway1 = routeHeadwayMin(r1);
+
+    for (let j = 0; j < routes.length; j++) {
+      if (i === j) continue;
+      const r2 = routes[j];
+      if (!r2.stopIds || r2.stopIds.length < 2) continue;
+      const idx2 = routeStopIndex(r2);
+      const headway2 = routeHeadwayMin(r2);
+
+      // intersection stops
+      const commonStops: string[] = [];
+      for (const sid of r1.stopIds) if (idx2.has(sid)) commonStops.push(sid);
+      if (commonStops.length === 0) continue;
+
+      for (const o of originCandidates) {
+        for (const d of destCandidates) {
+          // try a few best common stops (limit to keep compute cheap)
+          const commonLimited = commonStops.slice(0, 10);
+
+          for (const xfer of commonLimited) {
+            // r1: o -> xfer (must be forward)
+            const ride1Km = routeRideDistanceKm(r1, stopById, o.id, xfer);
+            if (ride1Km == null) continue;
+
+            // r2: xfer -> d (must be forward)
+            const ride2Km = routeRideDistanceKm(r2, stopById, xfer, d.id);
+            if (ride2Km == null) continue;
+
+            const accessMin = minutesForWalk(o.km);
+            const egressKm = haversineDistance((stopById.get(d.id)!).location, destination);
+            const egressMin = minutesForWalk(Number.isFinite(egressKm) ? egressKm : 0);
+            // ✅ skip unrealistic bus options
+if (accessMin > MAX_WALK_ACCESS_MIN || egressMin > MAX_WALK_ACCESS_MIN) continue;
+
+
+const expectedWait = (headway1 / 2 + headway2 / 2) * 0.6;
+
+            const base: Omit<TripPlan, 'cost'> = {
+              mode: 'bus',
+              routeIds: [r1.id, r2.id],
+              boardStopId: o.id,
+              transferStopId: xfer,
+              alightStopId: d.id,
+              walkAccessMin: accessMin,
+              walkEgressMin: egressMin,
+              waitMin: expectedWait,
+              rideMin: minutesForRide(ride1Km + ride2Km),
+              transfers: 1,
+              walkKm: (Number.isFinite(o.km) ? o.km : 0) + (Number.isFinite(egressKm) ? egressKm : 0),
+              rideKm: ride1Km + ride2Km,
+              label: `xfer:${r1.id}->${r2.id}@${xfer}`,
+            };
+
+            const plan: TripPlan = { ...base, cost: generalizedCost(base, w) };
+            if (plan.cost < best.cost) best = plan;
+          }
+        }
+      }
+    }
+  }
+
+  return best;
+}
+
+
+
+
 // ----------------------------------
 // Agents
 // ----------------------------------
@@ -476,6 +771,7 @@ const agents: Agent[] = [];
       schedule: [],
       currentScheduleIndex: 0,
       carbonEmitted: 0,
+      carBaselineCO2: 0,
       totalTimeSpent: 0,
       walkingTime: 0,
       waitingTime: 0,
@@ -511,8 +807,10 @@ export function stepSimulation(
   _vehicles: any[],
   minute: number,
   _routes: BusRoute[],
-  rawStops?: BusStop[]
+  rawStops?: BusStop[],
+  mode: 'demand' | 'assignment' = 'demand'
 ) {
+
   if (!rawStops || rawStops.length < 2) return { agents, vehicles: [] };
 
   const [south, west, north, east] = ASTON_BBOX;
@@ -530,6 +828,9 @@ export function stepSimulation(
 
   const graph = getGraph(stops);
   const t = ((minute % DAY) + DAY) % DAY;
+
+const routeById = new Map<string, BusRoute>((_routes || []).map(r => [r.id, r]));
+
 
   for (const agent of agents) {
     const a = agent as any;
@@ -564,21 +865,328 @@ export function stepSimulation(
 
       agent.targetLocation = clampToAstonBBox(next.destination);
 
+      // --- Car baseline (counterfactual) ---
+// Hackathon baseline: "Without transit, this trip would be by car"
+const tripKm = haversineDistance(agent.currentLocation, agent.targetLocation);
+if (Number.isFinite(tripKm) && tripKm > 0) {
+  agent.carBaselineCO2 =
+    (agent.carBaselineCO2 ?? 0) + (CARBON_FACTORS.car_per_km * tripKm) / 1000; // kg
+}
+
+
+
+            // --- Phase 1: compute assignment plan based on active routes ---
+      const activeRoutes = _routes || [];
+      const plan = computeTripPlanLite(
+        agent.currentLocation,
+        agent.targetLocation,
+        stops,
+        activeRoutes
+      );
+
+      // store plan (Phase 2 will actually execute it)
+      a._plan = plan;
+            // keep these ids for UI/debug consistency
+      if (plan.boardStopId) agent.nearestStopId = plan.boardStopId;
+      if (plan.alightStopId) agent.destinationStopId = plan.alightStopId;
+
+      // -----------------------------
+      // MODE SWITCH:
+      // assignment = execute plan (walk/wait/ride)
+      // demand = baseline kNN movement to generate flows
+      // -----------------------------
+      if (mode === 'assignment') {
+        // Start executing the chosen plan (Phase 2)
+        a._mode = 'executing_plan';
+        a._phase = 'idle';
+        a._phaseLeft = 0;
+
+        if (plan.mode === 'walk') {
+          a._phase = 'walk_to_dest';
+          a._phaseLeft = Math.max(0, Math.ceil(plan.walkAccessMin));
+          agent.state = 'walking_to_dest';
+        } else {
+          a._phase = 'walk_to_stop';
+          a._phaseLeft = Math.max(0, Math.ceil(plan.walkAccessMin));
+          agent.state = 'walking_to_stop';
+        }
+
+        agent.totalTimeSpent = agent.walkingTime + agent.ridingTime + agent.waitingTime;
+        continue;
+      }
+
+      // mode === 'demand': baseline movement for generating flows
       const origin = nearestStop(stops, agent.currentLocation);
       const dest = nearestStop(stops, agent.targetLocation);
+      recordFlow(origin.id, dest.id, minute);
+recordFlow(dest.id, origin.id, minute); // optional: makes corridors bidirectional
+
 
       agent.nearestStopId = origin.id;
       agent.destinationStopId = dest.id;
 
-      a._path = shortestPath(graph, origin.id, dest.id);
-      a._pathIndex = 0;
-      a._mode = a._path ? 'transit' : 'walk_direct';
-      agent.state = a._path ? 'riding' : 'walking_to_dest';
+      // ✅ Option A: Baseline demand = walk-only, but record demand on the stop graph
+const path = shortestPath(graph, origin.id, dest.id);
+
+if (path && path.length >= 2) {
+  // Decompose OD into corridor edges (so generator still works well)
+  for (let i = 0; i < path.length - 1; i++) {
+    recordFlow(path[i], path[i + 1], minute);
+    recordFlow(path[i + 1], path[i], minute); // bidirectional helps corridors
+  }
+} else {
+  // Fallback: record OD directly
+  recordFlow(origin.id, dest.id, minute);
+  recordFlow(dest.id, origin.id, minute);
+}
+
+// Baseline movement is walk-only (no stops / no waiting / no transit)
+a._mode = 'walk_direct';
+agent.state = 'walking_to_dest';
+continue;
+
+
+
     }
 
+
+    
     // Transit
-    if (a._mode === 'transit' && a._path) {
-      const path = a._path as string[];
+        // ----------------------------------
+    // Phase 2: Execute plan (timed phases, snap locations)
+    // ----------------------------------
+    if (mode === 'assignment' && a._mode === 'executing_plan' && a._plan) {
+      const plan = a._plan as TripPlan;
+
+      // still clamp for safety
+      agent.currentLocation = clampToAstonBBox(agent.currentLocation);
+
+      // decrement phase timer
+      if (a._phaseLeft > 0) {
+  a._phaseLeft -= 1;
+
+  // Smooth distance + CO2 accumulation (prevents popping)
+  if (a._phase === 'walk_to_stop') {
+    const denom = (plan.walkAccessMin + plan.walkEgressMin) || 1;
+    const kmPerMin = plan.walkKm / denom;
+    agent.distanceTraveled += kmPerMin;
+  } else if (a._phase === 'walk_to_dest') {
+    const denom = (plan.walkAccessMin + plan.walkEgressMin) || 1;
+    const kmPerMin = plan.walkKm / denom;
+    agent.distanceTraveled += kmPerMin;
+  } else if (a._phase === 'ride') {
+    const kmPerMin = plan.rideMin > 0 ? (plan.rideKm / plan.rideMin) : 0;
+    agent.distanceTraveled += kmPerMin;
+    agent.carbonEmitted += (CARBON_FACTORS.bus_per_passenger_km * kmPerMin) / 1000;
+  }
+
+  // Time + state updates
+  if (a._phase === 'walk_to_stop' || a._phase === 'walk_to_dest') {
+    agent.walkingTime += 1;
+    agent.state = a._phase === 'walk_to_stop' ? 'walking_to_stop' : 'walking_to_dest';
+  } else if (a._phase === 'wait') {
+    agent.waitingTime += 1;
+    agent.state = 'waiting';
+  } else if (a._phase === 'ride') {
+    agent.ridingTime += 1;
+    agent.state = 'riding';
+  }
+
+  agent.totalTimeSpent = agent.walkingTime + agent.ridingTime + agent.waitingTime;
+  continue;
+}
+
+
+      // phase complete -> advance
+      const stopById = new Map(stops.map(s => [s.id, s]));
+
+      // WALK ONLY
+      if (plan.mode === 'walk') {
+        // snap to destination, begin dwell
+        if (agent.targetLocation) agent.currentLocation = clampToAstonBBox(agent.targetLocation);
+
+        agent.distanceTraveled += plan.walkKm;
+
+        // Phase 3C: if walk-only is actually a "car trip" in the counterfactual, count it as car emissions in proposal
+const CAR_TRIP_THRESHOLD_KM = 1.2;
+if (plan.walkKm >= CAR_TRIP_THRESHOLD_KM) {
+  agent.carbonEmitted += (CARBON_FACTORS.car_per_km * plan.walkKm) / 1000;
+}
+
+
+
+
+        const trip = daily[idx];
+        a._dwellLeft = trip?.dwell ?? randInt(30, 120);
+        agent.targetLocation = null;
+        a._mode = 'idle';
+        a._tripIndex = idx + 1;
+        agent.state = 'at_destination';
+
+        agent.totalTimeSpent = agent.walkingTime + agent.ridingTime + agent.waitingTime;
+        continue;
+      }
+
+      // BUS PHASES
+      if (a._phase === 'walk_to_stop') {
+  const b = plan.boardStopId ? stopById.get(plan.boardStopId) : null;
+  if (!b) {
+    a._phase = 'walk_to_dest';
+    agent.state = 'walking_to_dest';
+    continue;
+  }
+
+  const m = moveToward(agent.currentLocation, b.location, WALK_KM_PER_MIN);
+  agent.currentLocation = clampToAstonBBox(m.next);
+  agent.walkingTime += 1;
+  agent.distanceTraveled += m.movedKm;
+  agent.state = 'walking_to_stop';
+
+  if (m.arrived) {
+    a._phase = 'wait';
+    a._waitLeft = Math.max(0, Math.round(plan.waitMin));
+    agent.state = 'waiting';
+  }
+
+  agent.totalTimeSpent = agent.walkingTime + agent.ridingTime + agent.waitingTime;
+  continue;
+}
+
+
+      if (a._phase === 'wait') {
+  // ✅ build ride segments stop-by-stop (so we can move along the corridor)
+  const rids = plan.routeIds || [];
+  const segments: string[][] = [];
+
+  if (rids.length === 1 && plan.boardStopId && plan.alightStopId) {
+    const r = routeById.get(rids[0]);
+    const seg = r ? routeStopSegment(r, plan.boardStopId, plan.alightStopId) : null;
+    if (seg && seg.length >= 2) segments.push(seg);
+  }
+
+  if (rids.length === 2 && plan.boardStopId && plan.transferStopId && plan.alightStopId) {
+    const r1 = routeById.get(rids[0]);
+    const r2 = routeById.get(rids[1]);
+    const seg1 = r1 ? routeStopSegment(r1, plan.boardStopId, plan.transferStopId) : null;
+    const seg2 = r2 ? routeStopSegment(r2, plan.transferStopId, plan.alightStopId) : null;
+    if (seg1 && seg1.length >= 2) segments.push(seg1);
+    if (seg2 && seg2.length >= 2) segments.push(seg2);
+  }
+
+  // If we failed to build segments, fall back to walking
+  if (segments.length === 0) {
+    a._phase = 'walk_to_dest';
+    agent.state = 'walking_to_dest';
+    continue;
+  }
+
+  // store ride plan
+  a._rideSegments = segments;     // string[][]
+  a._rideSegIndex = 0;            // which segment we're on
+  a._rideStopCursor = 0;          // index within the segment
+
+  a._phase = 'ride';
+  agent.state = 'riding';
+  continue;
+}
+
+
+      if (a._phase === 'ride') {
+  const segs: string[][] = a._rideSegments || [];
+  const segIndex: number = a._rideSegIndex ?? 0;
+  const cursor: number = a._rideStopCursor ?? 0;
+
+  if (!segs[segIndex] || segs[segIndex].length < 2) {
+    a._phase = 'walk_to_dest';
+    agent.state = 'walking_to_dest';
+    continue;
+  }
+
+  const seg = segs[segIndex];
+  const fromId = seg[cursor];
+  const toId = seg[cursor + 1];
+
+  if (!toId) {
+    // segment finished
+    if (segIndex + 1 < segs.length) {
+      a._rideSegIndex = segIndex + 1;
+      a._rideStopCursor = 0;
+      agent.state = 'riding';
+      continue;
+    }
+    // all ride done
+    a._phase = 'walk_to_dest';
+    agent.state = 'walking_to_dest';
+    continue;
+  }
+
+  const toStop = stopById.get(toId);
+  if (!toStop) {
+    a._phase = 'walk_to_dest';
+    agent.state = 'walking_to_dest';
+    continue;
+  }
+
+  const m = moveToward(agent.currentLocation, toStop.location, TRANSIT_KM_PER_MIN);
+  agent.currentLocation = clampToAstonBBox(m.next);
+  agent.ridingTime += 1;
+  agent.distanceTraveled += m.movedKm;
+
+  // accrue bus CO₂ smoothly (instead of once-per-trip)
+agent.carbonEmitted += (CARBON_FACTORS.bus_per_passenger_km * plan.rideKm) / 1000;
+
+  agent.state = 'riding';
+
+  if (m.arrived) {
+    a._rideStopCursor = cursor + 1;
+  }
+
+  agent.totalTimeSpent = agent.walkingTime + agent.ridingTime + agent.waitingTime;
+  continue;
+}
+
+
+      if (a._phase === 'walk_to_dest' && agent.targetLocation) {
+  const target = clampToAstonBBox(agent.targetLocation);
+  const m = moveToward(agent.currentLocation, target, WALK_KM_PER_MIN);
+  agent.currentLocation = clampToAstonBBox(m.next);
+  agent.walkingTime += 1;
+  agent.distanceTraveled += m.movedKm;
+  agent.state = 'walking_to_dest';
+
+  if (m.arrived) {
+    const trip = daily[idx];
+    a._dwellLeft = trip?.dwell ?? randInt(30, 120);
+    agent.targetLocation = null;
+    a._mode = 'idle';
+    a._tripIndex = idx + 1;
+    agent.state = 'at_destination';
+
+    // cleanup ride buffers
+    a._rideSegments = null;
+    a._rideSegIndex = 0;
+    a._rideStopCursor = 0;
+  }
+
+  agent.totalTimeSpent = agent.walkingTime + agent.ridingTime + agent.waitingTime;
+  continue;
+}
+
+
+    }
+          // ----------------------------------
+    // Demand-mode movement (baseline) - generates FLOW
+    // ----------------------------------
+    
+    // ----------------------------------
+// Demand-mode: walk to origin stop first
+// ----------------------------------
+
+
+
+if (mode === 'demand' && a._mode === 'transit' && a._path) {
+  const path = a._path as string[];
+
       if (a._pathIndex >= path.length - 1) {
         a._mode = 'walk_final';
         agent.state = 'walking_to_dest';
@@ -598,9 +1206,9 @@ export function stepSimulation(
       agent.currentLocation = clampToAstonBBox(m.next);
       agent.ridingTime++;
       agent.distanceTraveled += m.movedKm;
-      agent.carbonEmitted += (CARBON_FACTORS.bus_base_per_km * m.movedKm) / 1000;
       agent.state = 'riding';
 
+      // record demand flow on stop-to-stop edges
       recordFlow(fromId, toId, minute);
 
       if (m.arrived) a._pathIndex++;
@@ -608,31 +1216,7 @@ export function stepSimulation(
       continue;
     }
 
-    // Final walk
-    if (a._mode === 'walk_final' && agent.targetLocation) {
-      const target = clampToAstonBBox(agent.targetLocation);
-      const m = moveToward(agent.currentLocation, target, WALK_KM_PER_MIN);
-      agent.currentLocation = clampToAstonBBox(m.next);
-      agent.walkingTime++;
-      agent.distanceTraveled += m.movedKm;
-      agent.state = 'walking_to_dest';
-
-      if (m.arrived) {
-        // reached destination: start dwell
-        const trip = daily[idx];
-        a._dwellLeft = trip?.dwell ?? randInt(30, 120);
-        agent.targetLocation = null;
-        a._mode = 'idle';
-        a._tripIndex = idx + 1;
-        agent.state = 'at_destination';
-      }
-
-      agent.totalTimeSpent = agent.walkingTime + agent.ridingTime + agent.waitingTime;
-      continue;
-    }
-
-    // Direct walk fallback
-    if (a._mode === 'walk_direct' && agent.targetLocation) {
+    if (mode === 'demand' && a._mode === 'walk_final' && agent.targetLocation) {
       const target = clampToAstonBBox(agent.targetLocation);
       const m = moveToward(agent.currentLocation, target, WALK_KM_PER_MIN);
       agent.currentLocation = clampToAstonBBox(m.next);
@@ -652,35 +1236,119 @@ export function stepSimulation(
       agent.totalTimeSpent = agent.walkingTime + agent.ridingTime + agent.waitingTime;
       continue;
     }
+
+    if (mode === 'demand' && a._mode === 'walk_direct' && agent.targetLocation) {
+      const target = clampToAstonBBox(agent.targetLocation);
+      const m = moveToward(agent.currentLocation, target, WALK_KM_PER_MIN);
+      agent.currentLocation = clampToAstonBBox(m.next);
+      agent.walkingTime++;
+      agent.distanceTraveled += m.movedKm;
+      agent.state = 'walking_to_dest';
+
+      if (m.arrived) {
+        const trip = daily[idx];
+        a._dwellLeft = trip?.dwell ?? randInt(30, 120);
+        agent.targetLocation = null;
+        a._mode = 'idle';
+        a._tripIndex = idx + 1;
+        agent.state = 'at_destination';
+      }
+
+      agent.totalTimeSpent = agent.walkingTime + agent.ridingTime + agent.waitingTime;
+      continue;
+    }
+
   }
+
+  // --- Service-based bus emissions (kg) ---
+// Add CO2 based on how much bus service is operated this minute.
+// Very defensible for hackathon: emissions scale with service, not ridership.
+if (mode === 'assignment' && _routes && _routes.length) {
+  // km of service operated per minute across all routes
+  // assume each route runs once per headway; approximate frequency = 60/headway
+  let serviceKmThisMinute = 0;
+
+  for (const r of _routes) {
+    const headway = Math.max(5, routeHeadwayMin(r)); // safety
+    const freqPerHour = 60 / headway;
+    const freqPerMinute = freqPerHour / 60;
+
+    const km = r.geometry ? routeLengthKm(r.geometry as any) : 0;
+    serviceKmThisMinute += km * freqPerMinute;
+  }
+
+  const busCO2kgThisMinute = (CARBON_FACTORS.bus_per_passenger_km * serviceKmThisMinute) / 1000;
+  const perAgent = busCO2kgThisMinute / Math.max(1, agents.length);
+
+  for (const a of agents) {
+    a.carbonEmitted += perAgent;
+  }
+}
+
+
 
   return { agents, vehicles: [] };
 }
+
 
 // ----------------------------------
 // Metrics
 // ----------------------------------
 
 export function calculateMetrics(agents: Agent[]): SimulationMetrics {
+  
   const totalCO2 = agents.reduce((s, a) => s + a.carbonEmitted, 0);
+
+// baseline: if everyone drove the distance they travelled
+const totalDistKm = agents.reduce((s, a) => s + (a.distanceTraveled ?? 0), 0);
+const totalCarBaselineCO2 =
+  (CARBON_FACTORS.car_per_km * totalDistKm) / 1000; // kg
+
+// remaining cars: only agents who *didn't* get a bus plan
+const remainingCarDistKm = agents.reduce((s, a) => {
+  const mode = (a as any)._lastPlanMode;
+  return s + (mode === 'walk' ? (a.distanceTraveled ?? 0) : 0);
+}, 0);
+
+const remainingCarCO2 =
+  (CARBON_FACTORS.car_per_km * remainingCarDistKm) / 1000; // kg
+
+// scenario = bus service emissions (already in carbonEmitted) + remaining cars
+const scenarioCO2 = totalCO2 + remainingCarCO2;
+
+const co2Saved = Math.max(0, totalCarBaselineCO2 - scenarioCO2);
+
+if (agents.length && agents.every(a => a.state === 'at_destination')) {
+  console.log('[CO2 FINAL]', {
+    totalCO2,
+    totalCarBaselineCO2,
+    co2Saved: Math.max(0, totalCarBaselineCO2 - totalCO2),
+  });
+}
+
+
   const totalDist = agents.reduce((s, a) => s + a.distanceTraveled, 0);
 
   const riding = agents.filter(a => a.state === 'riding').length;
   const walking = agents.filter(a => a.state === 'walking_to_stop' || a.state === 'walking_to_dest').length;
   const arrived = agents.filter(a => a.state === 'at_destination').length;
+    const waiting = agents.filter(a => a.state === 'waiting').length;
 
   return {
     totalAgents: agents.length,
     activeAgents: agents.length - arrived,
     walkingAgents: walking,
-    waitingAgents: 0,
+    waitingAgents: waiting,
     ridingAgents: riding,
     arrivedAgents: arrived,
     averageTravelTime: agents.length ? agents.reduce((s, a) => s + a.totalTimeSpent, 0) / agents.length : 0,
-    averageWaitTime: 0,
-    totalCO2: Math.round(totalCO2 * 100) / 100,
-    co2PerCapita: agents.length ? Math.round((totalCO2 / agents.length) * 1000) / 1000 : 0,
-    co2Saved: 0,
+    averageWaitTime: agents.length ? agents.reduce((s, a) => s + a.waitingTime, 0) / agents.length : 0,
+
+    totalCO2: Math.round(scenarioCO2 * 100) / 100,
+co2PerCapita: agents.length ? Math.round((scenarioCO2 / agents.length) * 1000) / 1000 : 0,
+co2Saved: Math.round(co2Saved * 100) / 100,
+
+
     totalDistance: Math.round(totalDist * 100) / 100,
     averageAge: agents.length ? agents.reduce((s, a) => s + a.age, 0) / agents.length : 0,
     accessibilityCoverage: 100,

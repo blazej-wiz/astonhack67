@@ -14,10 +14,12 @@ interface ControlPanelProps {
   onToggleFlow: () => void;
   onToggleCorridors: () => void;
 
+  // NEW
+  onTogglePOIs: () => void;
+
   onGenerateRoute: () => void;
   onClearRoutes: () => void;
 }
-
 
 function formatTime(minute: number): string {
   const h = Math.floor(minute / 60);
@@ -45,6 +47,7 @@ export default function ControlPanel({
   onSetSpeed,
   onToggleFlow,
   onToggleCorridors,
+  onTogglePOIs,
   onGenerateRoute,
   onClearRoutes,
 }: ControlPanelProps) {
@@ -60,7 +63,7 @@ export default function ControlPanel({
     agents,
   } = state;
 
-  const { showFlow, showCorridors } = state as any;
+  const { showFlow, showCorridors, showPOIs } = state as any;
 
   const selectedAgent = useMemo(() => {
     if (!selectedAgentId) return null;
@@ -77,8 +80,6 @@ export default function ControlPanel({
   const analysis = (state as any).analysis as any | undefined;
   const baseline = analysis?.baseline ?? null;
   const proposal = analysis?.proposal ?? null;
-
-
 
   return (
     <div className="w-[380px] h-screen overflow-y-auto bg-sim-panel border-l border-sim-panel-border flex flex-col">
@@ -174,26 +175,35 @@ export default function ControlPanel({
             <Users className="w-4 h-4 text-primary" />
             Simulation Details
           </h2>
+
           <div className="flex items-center gap-2">
-  <button
-    onClick={onToggleFlow}
-    className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
-    title="Toggle demand (flow) lines"
-  >
-    {showFlow ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-    Demand
-  </button>
+            <button
+              onClick={onTogglePOIs}
+              className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+              title="Toggle POI markers"
+            >
+              {showPOIs ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+              POIs
+            </button>
 
-  <button
-    onClick={onToggleCorridors}
-    className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
-    title="Toggle generated corridors"
-  >
-    {showCorridors ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-    Corridors
-  </button>
-</div>
+            <button
+              onClick={onToggleFlow}
+              className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+              title="Toggle demand (flow) lines"
+            >
+              {showFlow ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+              Demand
+            </button>
 
+            <button
+              onClick={onToggleCorridors}
+              className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+              title="Toggle generated corridors"
+            >
+              {showCorridors ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+              Corridors
+            </button>
+          </div>
         </div>
 
         <StatRow label="Total Agents" value={metrics.totalAgents} />
@@ -269,7 +279,7 @@ export default function ControlPanel({
         </div>
       </div>
 
-      {/* ✅ Step 9: Before vs After */}
+      {/* ✅ Before vs After */}
       <div className="px-5 py-3 border-t border-sim-panel-border">
         <h2 className="text-sm font-semibold text-foreground flex items-center gap-2 mb-3">
           <TrendingUp className="w-4 h-4 text-primary" />
@@ -341,7 +351,7 @@ export default function ControlPanel({
       <div className="mt-auto px-5 py-3 border-t border-sim-panel-border">
         <div className="text-[10px] text-muted-foreground space-y-0.5">
           <p>Census 2021 · Population: {ASTON_CENSUS.totalPopulation.toLocaleString()} (modelled at {metrics.totalAgents} agents)</p>
-          <p>Bus data: Transport for West Midlands</p>
+          <p>POIs: OpenStreetMap (Overpass)</p>
           <p>Map: OpenStreetMap + CARTO Dark</p>
         </div>
       </div>

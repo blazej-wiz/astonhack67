@@ -11,8 +11,20 @@ export default defineConfig(({ mode }) => ({
     hmr: {
       overlay: false,
     },
+
+    // ✅ OSRM proxy to avoid CORS issues
+    proxy: {
+      "/osrm": {
+        target: "https://router.project-osrm.org",
+        changeOrigin: true,
+        secure: true,
+        rewrite: (path) => path.replace(/^\/osrm/, ""),
+      },
+    },
   },
+
   plugins: [react(), mode === "development" && componentTagger()].filter(Boolean),
+
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),

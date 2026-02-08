@@ -26,6 +26,7 @@ export interface Agent {
   schedule: ScheduleEntry[];
   currentScheduleIndex: number;
   carbonEmitted: number;
+  carBaselineCO2: number; // kg CO2 (counterfactual if trip was driven)
   totalTimeSpent: number;
   walkingTime: number;
   waitingTime: number;
