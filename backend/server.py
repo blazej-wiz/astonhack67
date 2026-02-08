@@ -13,6 +13,8 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 # Aston-ish center (tweak if you want)
 ASTON_CENTER = (52.4975, -1.8890)  # (lat, lng)
+ASTON_BBOX = (52.488, -1.915, 52.525, -1.845)  # (minLat, minLng, maxLat, maxLng)
+
 
 def haversine_m(a: Tuple[float, float], b: Tuple[float, float]) -> float:
     """Distance in meters between (lat, lng) points."""
@@ -223,22 +225,35 @@ def get_network(
     except FileNotFoundError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    net = build_aston_network(
+    '''net = build_aston_network(
         stops, routes, trips, stop_times, shapes,
         buffer_meters=bufferMeters,
-    )
+    )'''
 
     # If bbox provided, filter by bbox. Otherwise, return radius-based build result.
-    if all(v is not None for v in [minLat, minLng, maxLat, maxLng]):
+    '''if all(v is not None for v in [minLat, minLng, maxLat, maxLng]):
         return filter_network_by_bbox(
             net,
             bbox=(float(minLat), float(minLng), float(maxLat), float(maxLng)),
             min_stops_in_area=int(minStopsInArea),
             clip_shapes=True,
-        )
+        )'''
+    
+        # If bbox params are provided, use them; otherwise use the hardcoded Aston square
+    if all(v is not None for v in [minLat, minLng, maxLat, maxLng]):
+        bbox = (float(minLat), float(minLng), float(maxLat), float(maxLng))
+    else:
+        bbox = ASTON_BBOX
+
+    return filter_network_by_bbox(
+        net,
+        bbox=bbox,
+        min_stops_in_area=int(minStopsInArea),
+        clip_shapes=True,
+    )
 
     # No bbox -> just return net (or re-enable radius filter if you want)
-    return net
+    #return net
 
 
 @app.get("/api/gtfs/status")
