@@ -13,6 +13,8 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 # Aston-ish center (tweak if you want)
 ASTON_CENTER = (52.4975, -1.8890)  # (lat, lng)
+ASTON_BBOX = (52.488, -1.915, 52.525, -1.845)  # (minLat, minLng, maxLat, maxLng)
+
 
 def haversine_m(a: Tuple[float, float], b: Tuple[float, float]) -> float:
     """Distance in meters between (lat, lng) points."""
@@ -173,6 +175,7 @@ def filter_network_by_bbox(
     return out
 # Helper for busstops
 
+# ====== END ASTON FILTER HELPERS ======
 
 # ====== END ASTON FILTER HELPERS ======
 

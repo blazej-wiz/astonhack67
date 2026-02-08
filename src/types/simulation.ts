@@ -33,6 +33,12 @@ export interface Agent {
   ridingTime: number;
   distanceTraveled: number;
   currentRouteId: string | null;
+  _daily?: any[];
+  _mode?: 'idle' | 'transit' | 'walk_direct' | 'walk_final';
+  _tripIndex?: number;
+  _path?: string[] | null;
+  _pathIndex?: number;
+  _dwellLeft?: number;
 }
 
 export interface BusStop {
@@ -89,11 +95,20 @@ export interface SimulationState {
   vehicles: Vehicle[];
   metrics: SimulationMetrics;
   generatedRoutes: BusRoute[];
-  showRoutes: boolean;
+  showRoutes: true;
+  showFlow: true,
+  showCorridors: true,
   selectedAgentId: string | null;
 }
 
-// ✅ Make POI consistent with astonData.ts categories
+//export interface POI {
+
+export type POI = {
+  id: string;
+  name?: string;
+  type: POIType;          // <- REQUIRED
+  location: [number, number];
+}
 export type POIType =
   | 'education'
   | 'employment'
@@ -103,10 +118,3 @@ export type POIType =
   | 'leisure'
   | 'religious'
   | 'transport';
-
-export interface POI {
-  id: string;
-  name: string;
-  location: [number, number];
-  type: POIType;
-}

@@ -37,8 +37,8 @@ def build_aston_network(
     stops["dist_km"] = stops.apply(
         lambda r: haversine_km((r["lat"], r["lng"]), ASTON_CENTER), axis=1
     )
-    stops_near = stops[stops["dist_km"] <= buffer_km].copy()
 
+    stops_near = stops.copy()
     stop_id_set = set(stops_near["stop_id"].astype(str).tolist())
 
 

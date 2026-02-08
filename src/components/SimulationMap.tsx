@@ -261,9 +261,9 @@ export default function SimulationMap({
   useEffect(() => {
     if (!routeLayerRef.current) return;
     routeLayerRef.current.clearLayers();
-    if (!showCorridors) return;
 
-    const allRoutes = [...effectiveRoutes, ...generatedRoutes];
+    const allRoutes = [...(showRoutes ? effectiveRoutes : []),...(showCorridors ? generatedRoutes : []),
+];
     if (allRoutes.length === 0) return;
 
     const flow = getFlowEdges();
@@ -293,7 +293,7 @@ export default function SimulationMap({
         .bindTooltip(route.name, { sticky: true })
         .addTo(routeLayerRef.current);
     }
-  }, [showCorridors, generatedRoutes, effectiveRoutes, agents]);
+  }, [showRoutes, showCorridors, generatedRoutes, effectiveRoutes, agents]);
 
   // Agents layer
   useEffect(() => {

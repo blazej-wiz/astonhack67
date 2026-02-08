@@ -122,6 +122,8 @@ function computeDemandCapturedByRoutes(generatedRoutes: BusRoute[]) {
 
 
 export function useSimulation() {
+  const [pois, setPois] = useState<POI[]>([]);
+
   const [state, setState] = useState<any>({
     agents: [],
     vehicles: [],
@@ -147,7 +149,6 @@ baseRoutes: BUS_ROUTES,
     showPOIs: true,
 
     selectedAgentId: null,
-
     metrics: EMPTY_METRICS,
 
     simStartMinute: 6 * 60,
@@ -210,6 +211,12 @@ try {
   console.warn('[NET] Failed to fetch backend stops, using synthetic:', e);
 }
 
+  if (!state.networkStops || state.networkStops.length < 10) {
+    console.warn('[start] stops not loaded yet:', state.networkStops?.length);
+    return;
+  }
+  const seed = 1337;
+  const agentCount = Math.min(800, ASTON_CENSUS.totalPopulation);
 
 
     console.log('[SIM] city seed', seed, 'POIs', pois.length, 'Stops', stops.length);
@@ -218,7 +225,7 @@ try {
     const initialAgents = JSON.parse(JSON.stringify(agents));
 
 
-    clearFlow();
+  clearFlow();
 
 
     console.log('[START] Using stops:', stops.length, 'example:', stops[0]);
@@ -267,6 +274,8 @@ try {
       analysis: { baseline: null, proposal: null },
     }));
   }, []);
+
+
 
   useEffect(() => {
     if (!state.isRunning || state.isPaused) return;
@@ -417,7 +426,6 @@ setState((s: any) => {
   };
 });
   }, []);
-
   return {
     state,
     start,

@@ -4,6 +4,7 @@ import { useCallback } from 'react';
 import SimulationMap from '@/components/SimulationMap';
 import ControlPanel from '@/components/ControlPanel';
 import { useSimulation } from '@/hooks/useSimulation';
+import { BUS_ROUTES } from '@/data/astonData';
 
 export default function Index() {
   const {
