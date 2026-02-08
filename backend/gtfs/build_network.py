@@ -22,10 +22,13 @@ def build_aston_network(
     trips: pd.DataFrame,
     stop_times: pd.DataFrame,
     shapes: pd.DataFrame,
-    buffer_meters: int = 1500
+    buffer_meters: int = 1500,
+    bbox: Tuple[float, float, float, float] | None = None,  # (minLat,minLng,maxLat,maxLng)
 ) -> Dict:
     buffer_km = buffer_meters / 1000.0
 
+
+    
     # 1) Filter stops within buffer of Aston centre (Tier 1 quick filter)
     # Later: replace with your real polygon + point-in-polygon (we can do that next)
     stops = stops.copy()
@@ -37,6 +40,20 @@ def build_aston_network(
     stops_near = stops[stops["dist_km"] <= buffer_km].copy()
 
     stop_id_set = set(stops_near["stop_id"].astype(str).tolist())
+
+
+    if bbox is not None:
+        minLat, minLng, maxLat, maxLng = bbox
+        stops_near = stops[
+            (stops["lat"] >= minLat) & (stops["lat"] <= maxLat) &
+            (stops["lng"] >= minLng) & (stops["lng"] <= maxLng)
+        ].copy()
+    else:
+        buffer_km = buffer_meters / 1000.0
+        stops["dist_km"] = stops.apply(
+            lambda r: haversine_km((r["lat"], r["lng"]), ASTON_CENTER), axis=1
+        )
+        stops_near = stops[stops["dist_km"] <= buffer_km].copy()
 
     # 2) Find trips that serve these stops
     st = stop_times.copy()

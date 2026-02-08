@@ -1,5 +1,25 @@
 // src/hooks/useSimulation.ts
 
+import { fetchNetwork } from '@/api/network';
+import { ASTON_BBOX } from '@/data/astonData';
+
+
+function downsampleStopsGrid(
+  stops: BusStop[],
+  cellDeg = 0.0025,
+  maxPerCell = 2
+) {
+  const buckets = new Map<string, BusStop[]>();
+  for (const s of stops) {
+    const [lat, lng] = s.location;
+    const key = `${Math.floor(lat / cellDeg)}:${Math.floor(lng / cellDeg)}`;
+    const arr = buckets.get(key) ?? [];
+    if (arr.length < maxPerCell) arr.push(s);
+    buckets.set(key, arr);
+  }
+  return Array.from(buckets.values()).flat();
+}
+
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Agent, SimulationMetrics, BusRoute, POI, BusStop } from '@/types/simulation';
 import { ASTON_CENSUS, buildCity, randomHomeLocation, BUS_STOPS,BUS_ROUTES, POIS as FALLBACK_POIS } from '@/data/astonData';
@@ -99,6 +119,8 @@ function computeDemandCapturedByRoutes(generatedRoutes: BusRoute[]) {
   return { capturedTraversals: captured, totalTraversals, capturedPct: pct };
 }
 
+
+
 export function useSimulation() {
   const [state, setState] = useState<any>({
     agents: [],
@@ -157,8 +179,38 @@ baseRoutes: BUS_ROUTES,
     }
 
     const city = buildCity(seed, { poiCount: 500, stopCount: 80 });
-    const pois = (realPois && realPois.length > 20 ? realPois : city.pois) as POI[];
-    const stops = city.stops;
+const pois = (realPois && realPois.length > 20 ? realPois : city.pois) as POI[];
+
+// --- REAL STOPS (backend) with synthetic fallback ---
+let stops: BusStop[] = city.stops;
+
+try {
+  const [south, west, north, east] = ASTON_BBOX;
+  const net = await fetchNetwork({
+    bufferMeters: 1500,
+    bbox: { minLat: south, minLng: west, maxLat: north, maxLng: east },
+    minStopsInArea: 3,
+  });
+
+  const mapped: BusStop[] = (net.stops || [])
+    .map((s) => ({
+      id: String(s.id),
+      name: String(s.name || s.id),
+      location: [Number(s.lat), Number(s.lng)] as [number, number],
+    }))
+    .filter((s) => Number.isFinite(s.location[0]) && Number.isFinite(s.location[1]));
+
+  if (mapped.length >= 10) {
+    stops = downsampleStopsGrid(mapped, 0.0025, 2);
+    console.log('[NET] downsampled stops:', mapped.length, '->', stops.length);
+  } else {
+    console.warn('[NET] Too few backend stops, using synthetic');
+  }
+} catch (e) {
+  console.warn('[NET] Failed to fetch backend stops, using synthetic:', e);
+}
+
+
 
     console.log('[SIM] city seed', seed, 'POIs', pois.length, 'Stops', stops.length);
 
@@ -167,6 +219,9 @@ baseRoutes: BUS_ROUTES,
 
 
     clearFlow();
+
+
+    console.log('[START] Using stops:', stops.length, 'example:', stops[0]);
 
     setState((prev: any) => ({
       ...prev,
@@ -249,6 +304,11 @@ const activeRoutes =
     ? [...(prev.baseRoutes ?? []), ...(prev.generatedRoutes ?? [])]
     : [];
 
+
+
+if (prev.currentMinute === prev.simStartMinute) {
+  console.log('[TICK] networkStops in sim:', prev.networkStops.length, prev.networkStops[0]);
+}
 
 
 const result = stepSimulation(
