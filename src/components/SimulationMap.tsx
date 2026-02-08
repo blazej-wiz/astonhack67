@@ -51,7 +51,7 @@ interface SimulationMapProps {
   onSelectAgent: (id: string | null) => void;
   showFlow: boolean;
   showCorridors: boolean;
-
+  showRoutes: boolean;
   baseRoutes?: BusRoute[];
   stops?: SimpleStop[];
 }
@@ -66,6 +66,7 @@ export default function SimulationMap({
   stops,
   showFlow,
   showCorridors,
+  showRoutes,
 }: SimulationMapProps) {
   const mapRef = useRef<L.Map | null>(null);
   const mapContainerRef = useRef<HTMLDivElement>(null);
@@ -142,13 +143,24 @@ export default function SimulationMap({
     };
   }, []);
 
-  // Stops layer
- useEffect(() => {
+  // Stops Layer
+useEffect(() => {
   if (!stopsLayerRef.current) return;
   stopsLayerRef.current.clearLayers();
-  return; // ✅ stop markers never added
-}, [effectiveStops]);
 
+  for (const s of effectiveStops) {
+    if (!Array.isArray(s.location) || s.location.length !== 2) continue;
+
+    L.circleMarker(s.location as any, {
+      radius: 3,
+      weight: 1,
+      opacity: 0.8,
+      fillOpacity: 0.6,
+    })
+      .bindTooltip(s.name ?? s.id, { sticky: true })
+      .addTo(stopsLayerRef.current);
+  }
+}, [effectiveStops]);
 
   // ✅ Flow layer (new, Skyline-like)
   useEffect(() => {
@@ -184,9 +196,9 @@ export default function SimulationMap({
   useEffect(() => {
     if (!routeLayerRef.current) return;
     routeLayerRef.current.clearLayers();
-    if (!showCorridors) return;
 
-    const allRoutes = [...effectiveRoutes, ...generatedRoutes];
+    const allRoutes = [...(showRoutes ? effectiveRoutes : []),...(showCorridors ? generatedRoutes : []),
+];
     if (allRoutes.length === 0) return;
 
     // Scale generated route thickness based on how many stop-to-stop edges exist in flow
@@ -217,7 +229,7 @@ export default function SimulationMap({
         .bindTooltip(route.name, { sticky: true })
         .addTo(routeLayerRef.current);
     }
-  }, [showCorridors, generatedRoutes, effectiveRoutes, agents]);
+  }, [showRoutes, showCorridors, generatedRoutes, effectiveRoutes, agents]);
 
   // Agents layer
   useEffect(() => {

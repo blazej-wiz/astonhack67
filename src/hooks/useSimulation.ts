@@ -1,8 +1,11 @@
 // src/hooks/useSimulation.ts
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { Agent, SimulationMetrics, BusRoute } from '@/types/simulation';
-import { ASTON_CENSUS, buildCity, randomHomeLocation, BUS_STOPS } from '@/data/astonData';
+import { BUS_STOPS, ASTON_CENSUS, loadAstonPOIs ,randomHomeLocation, loadAstonBusStops} from '@/data/astonData';
+import type { Agent, SimulationMetrics, BusRoute, BusStop, POI } from '@/types/simulation';
+import { fetchNetwork } from '@/api/network'; // wherever your network.ts lives
+
+
 import {
   createAgents,
   stepSimulation,
@@ -98,22 +101,22 @@ function computeDemandCapturedByRoutes(generatedRoutes: BusRoute[]) {
 }
 
 export function useSimulation() {
+  const [pois, setPois] = useState<POI[]>([]);
+
   const [state, setState] = useState<any>({
     agents: [],
     vehicles: [],
     generatedRoutes: [],
-
-    networkStops: BUS_STOPS,
+    showRoutes: true,
+    showFlow: true,
+    showCorridors: true,
+    networkStops: [],
     networkLoaded: false,
-
     currentMinute: 0,
     isRunning: false,
     isPaused: false,
     speed: 1,
-    showFlow: true,
-    showCorridors: true,
     selectedAgentId: null,
-
     metrics: EMPTY_METRICS,
 
     simStartMinute: 6 * 60,
@@ -125,42 +128,111 @@ export function useSimulation() {
     },
   });
 
+  useEffect(() => {
+    console.log('[POI] loading...');
+    loadAstonPOIs()
+      .then((p) => {
+        console.log('[POI] loaded', p.length);
+        setPois(p);
+      })
+      .catch((err) => console.error('[POI] failed', err));
+  }, []);
+  
+// useEffect(() => {
+//   (async () => {
+//     try {
+//       const r = await fetch('http://localhost:8000/api/network');
+
+//       console.log('[network] status:', r.status);
+
+//       if (!r.ok) {
+//         // This makes your OSM fallback run on 500/404/etc
+//         throw new Error(`backend /api/network failed: ${r.status}`);
+//       }
+
+//       const net = await r.json();
+//       console.log('[network] loaded stops:', net.stops?.length);
+
+//       setState(prev => ({
+//         ...prev,
+//         networkStops: (net.stops ?? []).map((s: any) => ({
+//           id: String(s.id),
+//           name: s.name ?? String(s.id),
+//           location: [Number(s.lat), Number(s.lng)] as [number, number],
+//         })),
+//         networkLoaded: true,
+//       }));
+//     } catch (err) {
+//       console.error('[network] backend failed, falling back to OSM stops', err);
+
+//       const osmStops = await loadAstonBusStops();
+//       console.log('[network] OSM stops:', osmStops.length);
+
+//       setState(prev => ({
+//         ...prev,
+//         networkStops: osmStops,
+//         networkLoaded: true,
+//       }));
+//     }
+//   })();
+// }, []);
+  
+// new
+useEffect(() => { // new use effect for parameterised values
+  fetchNetwork(2500, 3)
+    .then(net => {
+      console.log('[network] loaded stops:', net.stops.length, 'routes:', net.routes.length);
+
+      setState(prev => ({
+        ...prev,
+        networkStops: net.stops.map(s => ({
+          id: String(s.id),
+          name: s.name ?? String(s.id),
+          location: [Number(s.lat), Number(s.lng)] as [number, number],
+        })),
+        networkLoaded: true,
+      }));
+    })
+    .catch(async err => {
+      console.error('[network] backend failed, falling back to OSM stops', err);
+      const osmStops = await loadAstonBusStops();
+      setState(prev => ({ ...prev, networkStops: osmStops, networkLoaded: true }));
+    });
+}, []);
   const timerRef = useRef<number | null>(null);
 
-  const start = useCallback(() => {
-    const seed = 1337; // change if you want different city “days”
-    const agentCount = Math.min(800, ASTON_CENSUS.totalPopulation);
+const start = useCallback(() => {
+  console.log('[start] networkStops:', state.networkStops?.length, 'first:', state.networkStops?.[0]?.id);
 
-    const city = buildCity(seed, { poiCount: 500, stopCount: 80 });
-    const pois = city.pois;
-    const stops = city.stops;
+  if (!state.networkStops || state.networkStops.length < 10) {
+    console.warn('[start] stops not loaded yet:', state.networkStops?.length);
+    return;
+  }
+  const seed = 1337;
+  const agentCount = Math.min(800, ASTON_CENSUS.totalPopulation);
 
-    console.log('[SIM] city seed', seed, 'POIs', pois.length, 'Stops', stops.length);
+  console.log('[start] using pois:', pois.length);
+  const agents = createAgents(agentCount, pois, () => randomHomeLocation(seed));
 
-    console.log("POIs in use:", pois.length);
+  clearFlow();
 
-    console.log(pois.map(p => p.name));
+  setState((prev: any) => ({
+    ...prev,
+    // keep existing stops unless you actually computed new ones
+    networkStops: prev.networkStops,
+    networkLoaded: true,
 
-
-    const agents = createAgents(agentCount, pois, () => randomHomeLocation(seed));
-
-    clearFlow();
-
-    setState((prev: any) => ({
-      ...prev,
-      networkStops: stops,
-      networkLoaded: true,
-
-      agents,
-      vehicles: [],
-      generatedRoutes: [],
-      currentMinute: prev.simStartMinute,
-      isRunning: true,
-      isPaused: false,
-      metrics: EMPTY_METRICS,
-      analysis: { baseline: null, proposal: null },
-    }));
-  }, []);
+    agents,
+    vehicles: [],
+    generatedRoutes: [],
+    currentMinute: prev.simStartMinute,
+    isRunning: true,
+    isPaused: false,
+    metrics: EMPTY_METRICS,
+    analysis: { baseline: null, proposal: null },
+  }));
+  //Note: add state.networkStops to the dependency list because we read it in start().
+}, [pois, state.networkStops]);
 
   const pause = useCallback(() => setState((prev: any) => ({ ...prev, isPaused: true })), []);
   const resume = useCallback(() => setState((prev: any) => ({ ...prev, isPaused: false })), []);
@@ -183,6 +255,8 @@ export function useSimulation() {
       analysis: { baseline: null, proposal: null },
     }));
   }, []);
+
+
 
   useEffect(() => {
     if (!state.isRunning || state.isPaused) return;
@@ -255,42 +329,72 @@ export function useSimulation() {
   }, []);
 
   const generateFromFlow = useCallback(() => {
-    setState((prev: any) => {
-      const routes = generateRoutesFromFlow(prev.networkStops, {
-        topEdges: 120,
-        minCount: 8,
-        maxRoutes: 8,
-        maxStopsPerRoute: 18,
-      });
+  setState((prev: any) => {
+  const stops = Array.isArray(prev.networkStops) ? prev.networkStops : BUS_STOPS;
 
-      const { capturedTraversals, capturedPct } = computeDemandCapturedByRoutes(routes);
-      const routeKm = routes.reduce((s: number, r: BusRoute) => s + (r.geometry ? routeLengthKm(r.geometry as any) : 0), 0);
-      const efficiency = routeKm > 0 ? capturedTraversals / routeKm : 0;
+    if (!Array.isArray(stops) || stops.length < 2) {
+      console.warn('[generate] no valid stops', prev.networkStops);
+      return prev;
+    }
 
-      const proposal: ProposalSnapshot = {
-        minute: prev.currentMinute,
-        routesCount: routes.length,
-        routeKm: Math.round(routeKm * 100) / 100,
-        demandCapturedPct: Math.round(capturedPct * 10) / 10,
-        demandCapturedTraversals: capturedTraversals,
-        efficiency: Math.round(efficiency * 10) / 10,
-      };
+    // 🔍 DEBUG FLOW (ADD HERE)
+    const flowEdges = getFlowEdges();
+    console.log(
+      '[generate] flow edges:',
+      flowEdges.length,
+      'top:',
+      flowEdges[0]
+    );
+
+    if (flowEdges.length === 0) {
+      console.warn('[generate] no flow yet - run sim for a bit first');
+      return prev;
+    }
+
+    const routes = generateRoutesFromFlow(stops, {
+      topEdges: 120,
+      minCount: 8,
+      maxRoutes: 8,
+      maxStopsPerRoute: 18,
+    });
+    console.log('[generate] stops in use:', stops.length, 'sample:', stops.slice(0, 3));
+    console.log('[generate] stop id sample:', stops.slice(0, 10).map(s => s.id));
+    console.log('[generate] routes:', routes.length, routes[0]);
+    console.log('[generate] using stops:', stops.length, 'first:', stops[0]);
+    const { capturedTraversals, capturedPct } = computeDemandCapturedByRoutes(routes);
+
+    const routeKm = routes.reduce(
+      (s: number, r: BusRoute) => s + (r.geometry ? routeLengthKm(r.geometry as any) : 0),
+      0
+    );
+
+    const efficiency = routeKm > 0 ? capturedTraversals / routeKm : 0;
+
+    const proposal: ProposalSnapshot = {
+      minute: prev.currentMinute,
+      routesCount: routes.length,
+      routeKm: Math.round(routeKm * 100) / 100,
+      demandCapturedPct: Math.round(capturedPct * 10) / 10,
+      demandCapturedTraversals: capturedTraversals,
+      efficiency: Math.round(efficiency * 10) / 10,
+    };
 
       return { ...prev, generatedRoutes: routes, analysis: { ...prev.analysis, proposal } };
     });
   }, []);
-
   return {
-    state,
-    start,
-    pause,
-    resume,
-    reset,
-    setSpeed,
-    selectAgent,
-    clearGeneratedRoutes,
-    generateFromFlow,
-    toggleFlow,
-    toggleCorridors,
+  state,
+  pois,
+  start,
+  pause,
+  resume,
+  reset,
+  setSpeed,
+  selectAgent,
+  clearGeneratedRoutes,
+  generateFromFlow,
+  toggleFlow,
+  toggleCorridors,
+  toggleRoutes,
   };
 }

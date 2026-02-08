@@ -1,9 +1,9 @@
 // src/pages/Index.tsx
-
-import { useCallback, useEffect } from 'react';
+import { useCallback } from 'react';
 import SimulationMap from '@/components/SimulationMap';
 import ControlPanel from '@/components/ControlPanel';
 import { useSimulation } from '@/hooks/useSimulation';
+import { BUS_ROUTES } from '@/data/astonData';
 
 export default function Index() {
   const {
@@ -15,13 +15,11 @@ export default function Index() {
     setSpeed,
     toggleCorridors,
     toggleFlow,
+    toggleRoutes,          // ✅ if you want the panel to toggle “routes”
     selectAgent,
     clearGeneratedRoutes,
     generateFromFlow,
   } = useSimulation();
-
-  // Auto-load TfWM stops on page load (optional)
-
 
   const handleGenerateRoute = useCallback(() => {
     generateFromFlow();
@@ -31,17 +29,17 @@ export default function Index() {
     <div className="flex h-screen w-screen overflow-hidden">
       <div className="flex-1 relative">
         <SimulationMap
-  agents={state.agents}
-  vehicles={state.vehicles}
-  showFlow={(state as any).showFlow}
-  showCorridors={(state as any).showCorridors}
-  generatedRoutes={state.generatedRoutes}
-  selectedAgentId={state.selectedAgentId}
-  onSelectAgent={selectAgent}
-  baseRoutes={[]}
-  stops={state.networkStops as any}
-/>
-
+          agents={state.agents}
+          vehicles={state.vehicles}
+          generatedRoutes={state.generatedRoutes}
+          selectedAgentId={state.selectedAgentId}
+          onSelectAgent={selectAgent}
+          showFlow={state.showFlow}
+          showCorridors={state.showCorridors}
+          stops={state.networkStops}
+          baseRoutes={state.showRoutes ? BUS_ROUTES : []}
+          showRoutes={state.showRoutes}
+          />
       </div>
 
       <ControlPanel

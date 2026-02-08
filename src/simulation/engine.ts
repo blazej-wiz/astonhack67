@@ -1,10 +1,12 @@
 // src/simulation/engine.ts
 // Offline-first: life-like schedules + dwell + flow recording
 
+
 import {
   ASTON_BBOX,
   ASTON_BOUNDARY,
   haversineDistance,
+  randomPointInAston,
   CARBON_FACTORS,
   clampToAstonBBox,
 } from '@/data/astonData';
@@ -15,17 +17,48 @@ import type { Agent, SimulationMetrics, BusStop, BusRoute, POI } from '@/types/s
 // Point-in-polygon + safe random
 // ----------------------------------
 
+
+function isValidLocation(loc: any): loc is [number, number] {
+  return (
+    Array.isArray(loc) &&
+    loc.length === 2 &&
+    typeof loc[0] === 'number' &&
+    typeof loc[1] === 'number' &&
+    Number.isFinite(loc[0]) &&
+    Number.isFinite(loc[1])
+  );
+}
+
+function sanitizeStops(stops: BusStop[]): BusStop[] {
+  return stops.filter(s => s && s.id && isValidLocation((s as any).location));
+}
+
 function pointInPolygon(point: [number, number], polygon: [number, number][]) {
-  const [x, y] = point;
+  const [x, y] = point; // lat, lng treated as x,y for ray casting
   let inside = false;
   for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
     const xi = polygon[i][0], yi = polygon[i][1];
     const xj = polygon[j][0], yj = polygon[j][1];
-    const intersect = (yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi + 1e-12) + xi;
+
+    const intersect =
+      yi > y !== yj > y &&
+      x < ((xj - xi) * (y - yi)) / (yj - yi + 1e-12) + xi;
+
     if (intersect) inside = !inside;
   }
   return inside;
 }
+
+function randomPointInAstonSafe(): [number, number] {
+  // Your existing randomPointInAston likely already respects boundary,
+  // but we harden it just in case.
+  for (let i = 0; i < 50; i++) {
+    const p = randomPointInAston();
+    if (pointInPolygon(p, ASTON_BOUNDARY as any)) return p;
+  }
+  return randomPointInAston();
+}
+
 
 function inBoundary(p: [number, number]) {
   return pointInPolygon(p, ASTON_BOUNDARY as any);
@@ -240,8 +273,8 @@ function pickColor(i: number) {
   ];
   return palette[i % palette.length];
 }
-
 export function generateRoutesFromFlow(stops: BusStop[], opts: GenerateOptions = {}): BusRoute[] {
+  if (!Array.isArray(stops) || stops.length < 2) return [];
   const stopById = new Map(stops.map(s => [s.id, s]));
   const { topEdges = 120, minCount = 8, maxRoutes = 8, maxStopsPerRoute = 18 } = opts;
 
@@ -361,59 +394,52 @@ function safeDest(p: [number, number]): [number, number] {
   return inBoundary(c) ? c : c; // boundary is rectangular anyway; kept for future polygon
 }
 
-function makeDailySchedule(agent: Agent, pois: POI[], primary: POI | null): Trip[] {
-  const home = agent.homeLocation;
-  const trips: Trip[] = [];
+// function makeDailySchedule(agent: Agent, pois: POI[], primary: POI | null): Trip[] {
+//   const home = agent.homeLocation;
+//   const trips: Trip[] = [];
 
-  // Base: everyone might do 1–3 activities + return home, with dwell.
-  // Students: school + maybe shop/social
+//   // Base: everyone might do 1–3 activities + return home, with dwell.
+//   // Students: school + maybe shop/social
+//   if (agent.age < 18) {
+//     const school = primary ?? pickPoi(pois, ['education']);
+//     if (school) {
+//       trips.push({ depart: 8 * 60 + randInt(-25, 25), destination: safeDest(school.location), dwell: randInt(300, 420) });
+
+
+function pickDestination(pois: POI[]): [number, number] {
+  if (pois.length > 0) {
+    const p = pois[Math.floor(Math.random() * pois.length)];
+    return p.location; // MUST be [lat, lng]
+  }
+  return randomPointInAstonSafe();
+}
+
+function makeSchedule(agent: Agent, pois: POI[] = [],): Trip[] {
+  //const home = safeDest(homeSampler());
+    const home = agent.homeLocation; // ✅ home comes from the agent
+
+  const schedule: Trip[] = [];
   if (agent.age < 18) {
-    const school = primary ?? pickPoi(pois, ['education']);
-    if (school) {
-      trips.push({ depart: 8 * 60 + randInt(-25, 25), destination: safeDest(school.location), dwell: randInt(300, 420) });
-    }
-    if (Math.random() < 0.35) {
-      const shop = pickPoi(pois, ['retail']);
-      if (shop) trips.push({ depart: 16 * 60 + randInt(-30, 40), destination: safeDest(shop.location), dwell: randInt(20, 60) });
-    }
-    trips.push({ depart: 17 * 60 + randInt(-10, 60), destination: home, dwell: randInt(600, 900) });
+    schedule.push({ depart: 8 * 60 + randInt(-20, 30), destination: pickDestination(pois) , dwell:0});
+    schedule.push({ depart: 15 * 60 + randInt(-15, 45), destination: home , dwell:0});
   }
-  // Working adults
-  else if (agent.age < 65) {
-    const work = primary ?? pickPoi(pois, ['employment']);
-    if (work) {
-      trips.push({ depart: 7 * 60 + randInt(-45, 60), destination: safeDest(work.location), dwell: randInt(360, 540) });
-    }
-    if (Math.random() < 0.55) {
-      const shop = pickPoi(pois, ['retail']);
-      if (shop) trips.push({ depart: 18 * 60 + randInt(-15, 75), destination: safeDest(shop.location), dwell: randInt(20, 70) });
-    }
-    if (Math.random() < 0.35) {
-      const social = pickPoi(pois, ['social', 'leisure', 'religious']);
-      if (social) trips.push({ depart: 19 * 60 + randInt(0, 120), destination: safeDest(social.location), dwell: randInt(45, 150) });
-    }
-    trips.push({ depart: 20 * 60 + randInt(0, 180), destination: home, dwell: randInt(600, 900) });
-  }
-  // Seniors
-  else {
-    if (Math.random() < 0.65) {
-      const health = pickPoi(pois, ['healthcare']);
-      if (health) trips.push({ depart: 10 * 60 + randInt(-30, 90), destination: safeDest(health.location), dwell: randInt(30, 120) });
-    }
-    if (Math.random() < 0.55) {
-      const social = pickPoi(pois, ['social', 'leisure', 'religious']);
-      if (social) trips.push({ depart: 13 * 60 + randInt(-10, 140), destination: safeDest(social.location), dwell: randInt(40, 160) });
-    }
-    if (Math.random() < 0.4) {
-      const shop = pickPoi(pois, ['retail']);
-      if (shop) trips.push({ depart: 16 * 60 + randInt(-20, 120), destination: safeDest(shop.location), dwell: randInt(15, 70) });
-    }
-    trips.push({ depart: 18 * 60 + randInt(0, 180), destination: home, dwell: randInt(700, 1000) });
-  }
+  else if (agent.age < 65 && Math.random() < 0.65) {
+    schedule.push({ depart: 7 * 60 + randInt(-40, 70), destination: pickDestination(pois), dwell:0 }); // “work”
+    schedule.push({ depart: 17 * 60 + randInt(-20, 80), destination: home , dwell:0});
 
-  // Ensure sorted and within day
-  trips.sort((a, b) => a.depart - b.depart);
-  return trips.map(t => ({ ...t, depart: Math.max(0, Math.min(DAY - 1, t.depart)) }));
+    if (Math.random() < 0.25) {
+      schedule.splice(1, 0, { depart: 18 * 60 + randInt(0, 60), destination: pickDestination(pois), dwell:0});
+      schedule.push({ depart: 19 * 60 + randInt(0, 90), destination: home , dwell:0});
+    }
+  }
+  else {
+    if (Math.random() < 0.7) {
+      schedule.push({ depart: 11 * 60 + randInt(-30, 60), destination: pickDestination(pois) , dwell:0});
+      schedule.push({ depart: 13 * 60 + randInt(0, 120), destination: home, dwell:0 });
+    }
+  }
+  schedule.sort((a, b) => a.depart - b.depart);
+  return schedule;
 }
 
 // ----------------------------------
@@ -421,23 +447,26 @@ function makeDailySchedule(agent: Agent, pois: POI[], primary: POI | null): Trip
 // ----------------------------------
 
 export function createAgents(count: number, pois: POI[], homeSampler: () => [number, number]): Agent[] {
-  const agents: Agent[] = [];
+const agents: Agent[] = [];
   const edu = pois.filter(p => p.type === 'education');
   const emp = pois.filter(p => p.type === 'employment');
 
   for (let i = 0; i < count; i++) {
     const home = safeDest(homeSampler());
+    //const home = randomPointInAstonSafe();
+
     const age = Math.floor(Math.random() * 80) + 5;
 
     // primary place: school/work anchor improves realism + repeated flow
-    let primary: POI | null = null;
-    if (age < 18) primary = pickOne(edu);
-    else if (age < 65 && Math.random() < 0.75) primary = pickOne(emp);
+    // let primary: POI | null = null;
+    // if (age < 18) primary = pickOne(edu);
+    // else if (age < 65 && Math.random() < 0.75) primary = pickOne(emp);
 
     const agent: Agent = {
       id: `agent_${i}`,
       homeLocation: home,
-      currentLocation: [...home],
+      //currentLocation: [...home],
+      currentLocation: home,
       targetLocation: null,
       nearestStopId: null,
       destinationStopId: null,
@@ -455,28 +484,27 @@ export function createAgents(count: number, pois: POI[], homeSampler: () => [num
       currentRouteId: null,
     };
 
-    (agent as any)._daily = makeDailySchedule(agent, pois, primary);
+
+   // (agent as any)._daily = makeDailySchedule(agent, pois, primary);
+    (agent as any)._daily = makeSchedule(agent, pois);
+
+    console.log('[createAgents] pois:', pois.length);
+    //console.log('[engine] agent0 daily', (agents[0] as any)?._daily);
+    // Store schedule on the agent without touching your types
     (agent as any)._mode = 'idle';
-    (agent as any)._dwellLeft = 0;
     (agent as any)._tripIndex = 0;
+    (agent as any)._dwellLeft = 0;
+    (agent as any)._path = null;
+    (agent as any)._pathIndex = 0;
 
     agents.push(agent);
   }
-
   return agents;
 }
 
 // ----------------------------------
 // Simulation step
 // ----------------------------------
-
-function isValidLocation(loc: any): loc is [number, number] {
-  return Array.isArray(loc) && loc.length === 2 && Number.isFinite(loc[0]) && Number.isFinite(loc[1]);
-}
-
-function sanitizeStops(stops: BusStop[]) {
-  return stops.filter(s => s && s.id && isValidLocation((s as any).location));
-}
 
 export function stepSimulation(
   agents: Agent[],
